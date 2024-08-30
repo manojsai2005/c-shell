@@ -124,7 +124,7 @@ void logg(char *token, char *file, queue *que, char **saveptr, char *curr, char 
     {
         queue_out(que);
     }
-    else if (strcmp(token, "purse") == 0)
+    else if (strcmp(token, "purge") == 0)
     {
         clear_que(que);
         que_to_file(que, file);
