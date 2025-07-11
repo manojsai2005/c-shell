@@ -1,6 +1,34 @@
 #include "headers.h"
 #include "que.h"
 
+int custom_ceil(double num)
+{
+    int integer_part = (int)num;
+    if (num == (double)integer_part)
+    {
+        return integer_part;
+    }
+    else
+    {
+        return integer_part + 1;
+    }
+}
+
+int blocks(char *path, char *file)
+{
+    char temp[4096 * 2];
+    struct stat temp_entry;
+    strcpy(temp, path);
+    strcat(temp, "/");
+    strcat(temp, file);
+    int block = 0;
+    if (stat(temp, &temp_entry) == 0)
+    {
+        block = custom_ceil((double)temp_entry.st_blocks / 2.0);
+    }
+    return block;
+}
+
 int compare_strings(const void *a, const void *b)
 {
     const char **str_a = (const char **)a;
@@ -72,28 +100,40 @@ void print_file_details(struct stat *file_stat, const char *filename)
     printf("%s\n", filename);
 }
 
-void parse_reveal_options(char *token, char **path, int *show_all, int *long_format, char *curr, char *prev,char *home, char **saveptr)
+void parse_reveal_options(char *token, char **path, int *show_all, int *long_format, char *curr, char *prev, char *home, char **saveptr)
 {
+    *show_all = 0;
+    *long_format = 0;
+    *path = curr;
+
     while (token != NULL)
     {
-        if (strcmp(token, "-a") == 0)
+        if (token[0] == '-')
         {
-            *show_all = 1;
+            int i = 1;
+            while (token[i] != '\0')
+            {
+                if (token[i] == 'a')
+                {
+                    *show_all = 1;
+                }
+                else if (token[i] == 'l')
+                {
+                    *long_format = 1;
+                }
+                else
+                {
+                    fprintf(stderr, "Invalid option: -%c\n", token[i]);
+                }
+                i++;
+            }
         }
-        else if (strcmp(token, "-l") == 0)
-        {
-            *long_format = 1;
-        }
-        else if (strcmp(token, "-al") == 0 || strcmp(token, "-la") == 0)
-        {
-            *show_all = 1;
-            *long_format = 1;
-        }
-        else if (strcmp(token, "~") == 0)
+        
+        else if (token[0] == '~')
         {
             *path = home;
         }
-        else if (strcmp(token, "-") == 0)
+        else if (token[0] == '-' && token[1] == '\0')
         {
             *path = prev;
         }
@@ -117,7 +157,6 @@ void reveal(char *path, int show_all, int long_format)
         path = ".";
     }
 
-    // Check if the given path is a file or a directory
     if (stat(path, &file_stat) < 0)
     {
         printf("\033[31mstat\033[0m\n");
@@ -126,7 +165,6 @@ void reveal(char *path, int show_all, int long_format)
 
     if (S_ISDIR(file_stat.st_mode))
     {
-        // If it's a directory, open it
         DIR *dir;
         struct dirent *entry;
 
@@ -144,9 +182,9 @@ void reveal(char *path, int show_all, int long_format)
                 continue;
             }
 
-            strcpy(fullpath, path);          // Copy the directory path to fullpath
-            strcat(fullpath, "/");           // Append a slash to the directory path
-            strcat(fullpath, entry->d_name); // Append the file name to the directory path
+            strcpy(fullpath, path);
+            strcat(fullpath, "/");
+            strcat(fullpath, entry->d_name);
 
             if (stat(fullpath, &file_stat) < 0)
             {
@@ -157,11 +195,7 @@ void reveal(char *path, int show_all, int long_format)
             file_list[file_count] = strdup(entry->d_name);
             file_count++;
         }
-
-        // Sort the file list lexicographically
         qsort(file_list, file_count, sizeof(char *), compare_strings);
-
-        // Print the files
         int total_blocks = 0;
         for (int i = 0; i < file_count; i++)
         {
@@ -173,9 +207,9 @@ void reveal(char *path, int show_all, int long_format)
         }
         for (int i = 0; i < file_count; i++)
         {
-            strcpy(fullpath, path);         // Copy the directory path to fullpath
-            strcat(fullpath, "/");          // Append a slash to the directory path
-            strcat(fullpath, file_list[i]); // Append the file name to the directory path
+            strcpy(fullpath, path);
+            strcat(fullpath, "/");
+            strcat(fullpath, file_list[i]);
 
             if (stat(fullpath, &file_stat) < 0)
             {
@@ -210,7 +244,6 @@ void reveal(char *path, int show_all, int long_format)
     }
     else
     {
-        // If it's a file, print its details directly
         if (long_format)
         {
             print_file_details(&file_stat, path);

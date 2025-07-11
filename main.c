@@ -3,19 +3,103 @@
 
 int fore_ground = 0;
 char COMMAND[] = "";
-typedef struct
-{
-    pid_t pid;
-    char command[4096];
-} BackgroundProcess;
 
 BackgroundProcess background_processes[1024];
 int bg_process_count = 0;
+int fg_pid = 0;
+
+int get_newest_pid()
+{
+    DIR *dir;
+    struct dirent *entry;
+    int max_pid = -1;
+
+    dir = opendir("/proc");
+    if (dir == NULL)
+    {
+        perror("opendir");
+        return -1;
+    }
+    while ((entry = readdir(dir)) != NULL)
+    {
+        int pid = atoi(entry->d_name);
+        if (pid > max_pid)
+        {
+            max_pid = pid;
+        }
+    }
+
+    closedir(dir);
+    return max_pid;
+}
+
+int kbhit()
+{
+    struct termios oldt, newt;
+    int ch;
+    int oldf;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+    ch = getchar();
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+    if (ch != EOF)
+    {
+        ungetc(ch, stdin);
+        return 1;
+    }
+
+    return 0;
+}
+
+void check_keypress(int *stop_flag)
+{
+    if (kbhit())
+    {
+        char ch = getchar();
+        if (ch == 'x' || ch == 'X')
+        {
+            *stop_flag = 1;
+        }
+    }
+}
+
+void neonate_n(int time_arg)
+{
+    int stop_flag = 0;
+    while (!stop_flag)
+    {
+        int newest_pid = get_newest_pid();
+        if (newest_pid != -1)
+        {
+            printf("%d\n", newest_pid);
+        }
+        for (int i = 0; i < 5 * time_arg; i++)
+        {
+            usleep(200000);
+            check_keypress(&stop_flag);
+            if (stop_flag)
+            {
+                break;
+            }
+        }
+    }
+    printf("Terminated by user.\n");
+}
 
 void handle_sigchld(int sig)
 {
     int status;
-    pid_t pid;
+    int pid;
+    int f = 1;
 
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
     {
@@ -30,56 +114,149 @@ void handle_sigchld(int sig)
                 else if (WIFSIGNALED(status))
                 {
                     printf("\033[31m%s got terminated by signal %d\033[0m\n", background_processes[i].command, WTERMSIG(status));
+                    f = 0;
                 }
-                for (int j = i; j < bg_process_count - 1; ++j)
+                if (f == 1)
                 {
-                    background_processes[j] = background_processes[j + 1];
+                    for (int j = i; j < bg_process_count - 1; ++j)
+                    {
+                        background_processes[j] = background_processes[j + 1];
+                    }
+                    bg_process_count--;
                 }
-                bg_process_count--;
+                // for (int j = i; j < bg_process_count - 1; ++j)
+                // {
+                //     background_processes[j] = background_processes[j + 1];
+                // }
+                // bg_process_count--;
                 break;
             }
         }
     }
 }
 
-int custom_ceil(double num)
+void for_CTRL_C(int signal)
 {
-    int integer_part = (int)num;
-    if (num == (double)integer_part)
+    if (fg_pid == 0)
     {
-        return integer_part;
+        printf("no fg process running currently\n");
+        return;
+    }
+    if (kill(fg_pid, 0) == 0)
+    {
+        if (kill(fg_pid, SIGKILL) == 0)
+        {
+            printf("Sent signal %d to process with pid %d", signal, fg_pid);
+            fg_pid = 0;
+        }
     }
     else
     {
-        return integer_part + 1;
+        printf("no fg process running currently\n");
     }
 }
 
-int blocks(char *path, char *file)
+void for_CTRL_Z(int signal)
 {
-    char temp[4096 * 2];
-    struct stat temp_entry;
-    strcpy(temp, path);
-    strcat(temp, "/");
-    strcat(temp, file);
-    int block = 0;
-    if (stat(temp, &temp_entry) == 0)
+    if (fg_pid == 0)
     {
-        block = custom_ceil((double)temp_entry.st_blocks / 2.0);
+        printf("No foreground process running currently\n");
+        return;
     }
-    return block;
-}
-
-void path_(char *curr, char *home, char *display_path, int size)
-{
-    if (strncmp(curr, home, strlen(home)) == 0)
+    if (kill(fg_pid, SIGTSTP) == 0)
     {
-        snprintf(display_path, size, "~%s", curr + strlen(home));
+        printf("Sent signal %d (SIGTSTP) to process with pid %d\n", signal, fg_pid);
+        background_processes[bg_process_count].pid = fg_pid;
+        snprintf(background_processes[bg_process_count].command, sizeof(background_processes[bg_process_count].command), "%s", COMMAND);
+        bg_process_count++;
+        fg_pid = 0;
+        if (tcsetpgrp(STDIN_FILENO, getpgid(0)) == -1)
+        {
+            perror("tcsetpgrp failed");
+        }
     }
     else
     {
-        strncpy(display_path, curr, size - 1);
-        display_path[size - 1] = '\0';
+        perror("Failed to send SIGTSTP");
+    }
+}
+
+void fg_command(int pid)
+{
+    int found = 0;
+    int n_bg = 0;
+    for (int i = 0; i < bg_process_count; ++i)
+    {
+        if (background_processes[i].pid == pid)
+        {
+            strcpy(COMMAND,background_processes[i].command);
+            found = 1;
+            for (int j = i; j < bg_process_count - 1; ++j)
+            {
+                background_processes[j] = background_processes[j + 1];
+            }
+            bg_process_count--;
+            break;
+        }
+    }
+    if (kill(pid, 0) == 0)
+    {
+        n_bg = 1;
+        // printf("it is here");
+    }   
+    if (n_bg == 1 && found == 1)
+    {
+        fg_pid = pid;
+        int k = kill(pid, SIGCONT);
+        if (k < 0)
+        {
+            perror("Failed to send SIGCONT");
+        }
+        // if (tcsetpgrp(STDIN_FILENO, getpgid(pid)) == -1)
+        // {
+        //     perror("Failed to give terminal control to the process");
+        //     // printf("here");
+        // }
+        // signal(SIGTTIN, SIG_IGN);
+        // signal(SIGTTOU, SIG_IGN);
+        int status;
+        waitpid(pid, &status, WUNTRACED);
+        // if (WIFSTOPPED(status))
+        // {
+        //     printf("Process %d stopped\n", pid);
+        // }
+        // else if (WIFEXITED(status))
+        // {
+        //     printf("Process %d terminated\n", pid);
+        // }
+        // if (tcsetpgrp(STDIN_FILENO, getpgrp()) == -1)
+        // {
+        //     perror("Failed to restore terminal control to shell");
+        // }
+        // signal(SIGTTIN, SIG_DFL);
+        // signal(SIGTTOU, SIG_DFL);
+
+        // fg_pid = 0;
+    }
+
+    if (found == 0 && n_bg == 0)
+    {
+        printf("No such process found\n");
+    }
+}
+
+void bg_command(int pid)
+{
+    if (kill(pid, 0) == 0)
+    {
+        if (kill(pid, SIGCONT) < 0)
+        {
+            perror("Failed to send SIGCONT");
+        }
+    }
+    else
+    {
+        printf("process with pid %d doesn't exist", pid);
     }
 }
 
@@ -107,7 +284,7 @@ void printinfo(char *curr, char *home)
 
     if (fore_ground == 1)
     {
-        printf("\033[32m%s@\033[0m\033[32m%s\033[0m:\033[34m%s\033[0m \033[37m%s\033[0m> ", username, hostname, display_path, COMMAND);
+        printf("<\033[32m%s@\033[0m\033[32m%s\033[0m:\033[34m%s\033[0m \033[37m%s\033[0m> ", username, hostname, display_path, COMMAND);
         fore_ground--;
     }
     else
@@ -116,68 +293,45 @@ void printinfo(char *curr, char *home)
     }
 }
 
-void initial_tokenize(char *input, char *curr, char *prev, char *home, queue *que, char *file);
-
-void logg(char *token, char *file, queue *que, char **saveptr, char *curr, char *prev, char *home)
+char *get_token_value_from_myshrc(const char *token, const char *myshrc_path)
 {
-    if (token == NULL)
+    FILE *file = fopen(myshrc_path, "r");
+    if (!file)
     {
-        queue_out(que);
+        perror("Failed to open .myshrc");
+        return NULL;
     }
-    else if (strcmp(token, "purge") == 0)
+
+    char line[4096];
+    int token_len = strlen(token);
+
+    while (fgets(line, sizeof(line), file))
     {
-        clear_que(que);
-        que_to_file(que, file);
+        char *token_pos = strstr(line, token);
+        if (token_pos && (token_pos == line || *(token_pos - 1) == ' ' || *(token_pos - 1) == '\t'))
+        {
+            char *equal_pos = strchr(token_pos + token_len, '=');
+            if (equal_pos)
+            {
+                char *value = equal_pos + 1;
+                int value_len = strcspn(value, "\n");
+                value[value_len] = '\0';
+                char *result = malloc(value_len + 1);
+                if (result)
+                {
+                    strcpy(result, value);
+                }
+
+                fclose(file);
+                return result;
+            }
+        }
     }
-    else if (strcmp(token, "execute") == 0)
-    {
-        token = strtok_r(NULL, " ", saveptr);
-        int n = atoi(token);
-        int r = que->filled - n;
-        int want = (r + que->front) % QUEUE_CAPACITY;
-        // split_tokens(que->info[want], curr, prev, home, que, file);
-        initial_tokenize(que->info[want], curr, prev, home, que, file);
-    }
-}
-void trim_whitespace(char *str)
-{
-    // Trim leading whitespace
-    char *start = str;
-    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r')
-        start++;
 
-    // Move the trimmed string to the beginning
-    if (str != start)
-        memmove(str, start, strlen(start) + 1);
-
-    // Trim trailing whitespace
-    char *end = str + strlen(str) - 1;
-    while (end > str && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r'))
-        end--;
-
-    // Null-terminate the string after trimming
-    *(end + 1) = '\0';
+    fclose(file);
+    return NULL;
 }
 
-// Function to tokenize input by '&' and pass tokens to split_tokens
-
-void print_with_colour(const char *path, int is_dir, int is_exec)
-{
-    if (is_dir)
-    {
-        printf("\033[34m%s\033[0m\n", path); // Blue for directories
-    }
-    else if (is_exec)
-    {
-        printf("\033[32m%s\033[0m\n", path); // Green for executables
-    }
-    else
-    {
-        printf("%s\n", path); // Default for regular files
-    }
-}
-
-// Function to check if the path is a directory
 int is_directory(const char *path)
 {
     struct stat statbuf;
@@ -188,32 +342,209 @@ int is_directory(const char *path)
     return 0;
 }
 
-// Function to perform the seek operation
+char *get_process_status(pid_t pid)
+{
+    char status_path[40];
+    snprintf(status_path, sizeof(status_path), "/proc/%d/status", pid);
+
+    FILE *status_file = fopen(status_path, "r");
+    if (!status_file)
+    {
+        return "Unknown (Process does not exist or no permission)";
+    }
+
+    char line[4096];
+    char status_str[16] = "Unknown";
+    while (fgets(line, sizeof(line), status_file))
+    {
+        if (strncmp(line, "State:", 6) == 0)
+        {
+            sscanf(line, "State:\t%s", status_str);
+            break;
+        }
+    }
+    fclose(status_file);
+
+    if (status_str[0] == 'T')
+    {
+        return "Stopped";
+    }
+    else if (status_str[0] == 'R' || status_str[0] == 'S')
+    {
+        return "Running";
+    }
+
+    return "Unknown (Unrecognized state)";
+}
+
+int cmp_bg_processes(const void *a, const void *b)
+{
+    BackgroundProcess *procA = (BackgroundProcess *)a;
+    BackgroundProcess *procB = (BackgroundProcess *)b;
+    return (procA->pid - procB->pid);
+}
 
 void execute_command(char *command, int is_background)
 {
+    int fd_in = -1, fd_out = -1;
+    int input_redirect = 0, output_redirect = 0, append_redirect = 0;
+    char *input_file = NULL, *output_file = NULL;
+    char *cmd_part = strdup(command);
+    char *argv[4096];
+    int arg_count = 0;
+    int in_quotes = 0;      // To track whether we're inside quotes
+    char quote_char = '\0'; // To track whether it's a single or double quote
+    char *token = (char *)malloc(strlen(cmd_part) + 1);
+    int token_index = 0;
+
+    for (int i = 0; cmd_part[i] != '\0'; i++)
+    {
+        char c = cmd_part[i];
+
+        if ((c == '"' || c == '\'') && !in_quotes)
+        {
+            in_quotes = 1;
+            quote_char = c;
+            continue;
+        }
+        else if (c == quote_char && in_quotes)
+        {
+            in_quotes = 0;
+            quote_char = '\0';
+            continue;
+        }
+        if (in_quotes || (c != ' ' && c != '\t'))
+        {
+            token[token_index++] = c;
+        }
+        else
+        {
+            if (token_index > 0)
+            {
+                token[token_index] = '\0';
+                if (strcmp(token, "<") == 0)
+                {
+                    input_redirect = 1;
+                    input_file = (char *)malloc(256);
+                    int file_index = 0;
+                    while (cmd_part[++i] == ' ' || cmd_part[i] == '\t')
+                        ;
+
+                    while (cmd_part[i] != ' ' && cmd_part[i] != '\t' && cmd_part[i] != '\0')
+                    {
+                        input_file[file_index++] = cmd_part[i++];
+                    }
+                    input_file[file_index] = '\0';
+                    i--;
+                }
+                else if (strcmp(token, ">>") == 0)
+                {
+                    append_redirect = 1;
+                    output_file = (char *)malloc(256);
+                    int file_index = 0;
+                    while (cmd_part[++i] == ' ' || cmd_part[i] == '\t')
+                        ;
+
+                    while (cmd_part[i] != ' ' && cmd_part[i] != '\t' && cmd_part[i] != '\0')
+                    {
+                        output_file[file_index++] = cmd_part[i++];
+                    }
+                    output_file[file_index] = '\0';
+                    i--;
+                }
+                else if (strcmp(token, ">") == 0)
+                {
+                    output_redirect = 1;
+                    output_file = (char *)malloc(256);
+                    int file_index = 0;
+                    while (cmd_part[++i] == ' ' || cmd_part[i] == '\t')
+                        ;
+
+                    while (cmd_part[i] != ' ' && cmd_part[i] != '\t' && cmd_part[i] != '\0')
+                    {
+                        output_file[file_index++] = cmd_part[i++];
+                    }
+                    output_file[file_index] = '\0';
+                    i--;
+                }
+                else
+                {
+                    argv[arg_count++] = strdup(token);
+                }
+
+                token_index = 0;
+            }
+        }
+    }
+
+    if (token_index > 0)
+    {
+        token[token_index] = '\0';
+        argv[arg_count++] = strdup(token);
+    }
+
+    argv[arg_count] = NULL;
+    free(token);
+
     pid_t pid = fork();
     if (pid < 0)
     {
-        printf("\033[31mfork failed\033[0m\n");
-
+        perror("fork");
+        free(cmd_part);
         return;
     }
     else if (pid == 0)
     {
-        // Child process
-        char *argv[] = {"/bin/sh", "-c", command, NULL};
-        execvp(argv[0], argv);
-        printf("\033[31mexec failed\033[0m\n");
-        exit(1);
+        if (is_background)
+        {
+            setpgid(0, 0);
+            signal(SIGINT, SIG_IGN);
+        }
+
+        if (input_redirect)
+        {
+            fd_in = open(input_file, O_RDONLY);
+            if (fd_in < 0)
+            {
+                perror("open input file");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd_in, STDIN_FILENO);
+            close(fd_in);
+        }
+        if (output_redirect)
+        {
+            fd_out = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd_out < 0)
+            {
+                perror("open output file");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd_out, STDOUT_FILENO);
+            close(fd_out);
+        }
+        if (append_redirect)
+        {
+            fd_out = open(output_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd_out < 0)
+            {
+                perror("open output file");
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd_out, STDOUT_FILENO);
+            close(fd_out);
+        }
+        if (execvp(argv[0], argv) == -1)
+        {
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        }
     }
     else
     {
-        // Parent process
         if (is_background)
         {
             printf("[%d] %s\n", pid, command);
-            // Store the background process (assuming you have a struct and array for background processes)
             background_processes[bg_process_count].pid = pid;
             strncpy(background_processes[bg_process_count].command, command, sizeof(background_processes[bg_process_count].command) - 1);
             background_processes[bg_process_count].command[sizeof(background_processes[bg_process_count].command) - 1] = '\0';
@@ -222,7 +553,9 @@ void execute_command(char *command, int is_background)
         else
         {
             time_t start_time = time(NULL);
-            waitpid(pid, NULL, 0);
+            fg_pid = pid;
+            strcpy(COMMAND, command);
+            waitpid(pid, NULL, WUNTRACED);
             time_t end_time = time(NULL);
             double elapsed_time = difftime(end_time, start_time);
 
@@ -230,351 +563,37 @@ void execute_command(char *command, int is_background)
             if (elapsed_time > 2.0)
             {
                 fore_ground = 1;
-                strcpy(COMMAND, command);
             }
         }
         fflush(stdout);
     }
+    free(cmd_part);
+    free(input_file);
+    free(output_file);
 }
 
-void tokenize_by_ampersand(char *input, char *curr, char *prev, char *home, queue *que, char *file, int count)
+void activity()
 {
-    char *token;
-    char *saveptr;
-    char input_copy[4096];
-    strncpy(input_copy, input, sizeof(input_copy) - 1);
-    input_copy[sizeof(input_copy) - 1] = '\0';
-
-    // Tokenize the input by '&'
-    token = strtok_r(input_copy, "&", &saveptr);
-    while (token != NULL)
+    if (bg_process_count == 0)
     {
-        trim_whitespace(token); // Trim leading and trailing whitespace
-        split_tokens(token, curr, prev, home, que, file, count);
-        count--;
-        token = strtok_r(NULL, "&", &saveptr);
-    }
-}
-
-char *parse_seek_arguments(char *token, char *saveptr, int *only_dirs, int *only_files, int *enable_e_flag, char *curr)
-{
-    char search[4096];
-    char *dir = curr; // Default to current directory
-    int search_set = 0;
-
-    while (token != NULL)
-    {
-        if (strcmp(token, "-d") == 0)
-        {
-            *only_dirs = 1;
-        }
-        else if (strcmp(token, "-f") == 0)
-        {
-            *only_files = 1;
-        }
-        else if (strcmp(token, "-e") == 0)
-        {
-            *enable_e_flag = 1;
-        }
-        else if (search_set == 0)
-        {
-            strcpy(search, token);
-            search_set = 1;
-        }
-        else
-        {
-            dir = token;
-        }
-        token = strtok_r(NULL, " ", &saveptr);
-    }
-
-    seek(search, dir, *only_dirs, *only_files, *enable_e_flag);
-    return dir;
-}
-
-void split_tokens(char *input, char *curr, char *prev, char *home, queue *que, char *file, int count)
-{
-    char *token;
-    char *saveptr;
-    int exec = 0;
-    int is = 0;
-    int c = count;
-    char input_copy[4096];
-    strncpy(input_copy, input, sizeof(input_copy) - 1);
-    input_copy[sizeof(input_copy) - 1] = '\0';
-
-    token = strtok_r(input, " ", &saveptr);
-    while (token != NULL)
-    {
-        trim_whitespace(token);
-
-        if (strcmp(token, "hop") == 0)
-        {
-            token = strtok_r(NULL, " ", &saveptr);
-            while (token != NULL)
-            {
-                hop(curr, prev, home, token);
-                token = strtok_r(NULL, " ", &saveptr);
-            }
-        }
-        else if (strcmp(token, "reveal") == 0)
-        {
-            int show_all = 0;
-            int long_format = 0;
-            char *path = NULL;
-
-            token = strtok_r(NULL, " ", &saveptr);
-            parse_reveal_options(token, &path, &show_all, &long_format, curr, prev, home, &saveptr);
-            reveal(path, show_all, long_format);
-        }
-        else if (strcmp(token, "log") == 0)
-        {
-            token = strtok_r(NULL, " ", &saveptr);
-            logg(token, file, que, &saveptr, curr, prev, home);
-        }
-        else if (strcmp(token, "proclore") == 0)
-        {
-            token = strtok_r(NULL, " ", &saveptr);
-            process_info(token);
-        }
-        else if (strcmp(token, "\n") == 0)
-        {
-            // Empty command, do nothing
-        }
-        else if (strcmp(token, "seek") == 0)
-        {
-            int only_dirs = 0, only_files = 0, enable_e_flag = 0;
-            is = 1;
-            token = strtok_r(NULL, " ", &saveptr);
-
-            // Update curr based on the result from parse_seek_arguments
-            curr = parse_seek_arguments(token, saveptr, &only_dirs, &only_files, &enable_e_flag, curr);
-        }
-        else
-        {
-            exec = 1;
-        }
-
-        token = strtok_r(NULL, " ", &saveptr);
-    }
-
-    // Execute external commands if needed
-    // printf("%d\n", c);
-    if (exec == 1 && is == 0)
-    {
-        if (c > 0)
-        {
-            execute_command(input_copy, 1);
-        }
-        else
-        {
-            execute_command(input_copy, 0);
-        }
-    }
-}
-
-int search_directory(const char *search_term, const char *dir_path, int dir_flag, int file_flag, int exec_flag);
-
-void seek(const char *search_term, const char *target_directory, int dir_flag, int file_flag, int exec_flag)
-{
-    // Check for invalid flag combinations
-    // printf("%d\n", dir_flag);
-    // printf("%d\n", file_flag);
-    if (dir_flag && file_flag)
-    {
-        printf("Invalid flags!\n");
+        printf("No background processes\n");
         return;
     }
-
-    // Initialize the directory to search
-    if (target_directory == NULL)
+    BackgroundProcess sorted_processes[1024];
+    for (int i = 0; i < bg_process_count; ++i)
     {
-        target_directory = ".";
+        sorted_processes[i] = background_processes[i];
     }
-
-    // Call the recursive search function
-    // printf("tt");
-    int found = search_directory(search_term, target_directory, dir_flag, file_flag, exec_flag);
-    // printf("%d", found);
-    if (!found)
+    qsort(sorted_processes, bg_process_count, sizeof(BackgroundProcess), cmp_bg_processes);
+    for (int i = 0; i < bg_process_count; ++i)
     {
-        printf("No match found!\n");
-    }
-}
+        pid_t pid = sorted_processes[i].pid;
+        char *command = sorted_processes[i].command;
+        char *status = get_process_status(pid);
 
-int search_directory(const char *search_term, const char *dir_path, int dir_flag, int file_flag, int exec_flag)
-{
-    DIR *dir = opendir(dir_path);
-    struct dirent *entry;
-    struct stat entry_info;
-    int match_count = 0;
-    int matching_dir_count = 0;
-    char matching_dir[4096] = {0}; // To store the path of the matching directory if exactly one is found
-
-    if (!dir)
-    {
-        perror("opendir");
-        return 0;
-    }
-
-    while ((entry = readdir(dir)) != NULL)
-    {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-        {
-            continue;
-        }
-
-        char fullpath[1024];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir_path, entry->d_name);
-
-        if (stat(fullpath, &entry_info) < 0)
-        {
-            printf("\033[31mstat failed\033[0m\n");
-            continue;
-        }
-
-        int is_dir = S_ISDIR(entry_info.st_mode);
-        int is_file = S_ISREG(entry_info.st_mode);
-
-        // Apply the filter based on flags
-        if ((dir_flag && is_dir) || (file_flag && is_file) || (!dir_flag && !file_flag))
-        {
-            if (strstr(entry->d_name, search_term) != NULL)
-            {
-                match_count++;
-                if (is_dir)
-                {
-                    printf("\033[1;34m%s/%s\033[0m\n", dir_path, entry->d_name); // Blue for directories
-                    if (exec_flag)
-                    {
-                        matching_dir_count++;
-                        if (matching_dir_count == 1)
-                        {
-                            strncpy(matching_dir, fullpath, sizeof(matching_dir) - 1);
-                        }
-                    }
-                }
-                else
-                {
-                    printf("\033[1;32m%s/%s\033[0m\n", dir_path, entry->d_name); // Green for files
-                    if (exec_flag && match_count == 1)
-                    {
-                        FILE *file = fopen(fullpath, "r");
-                        if (file)
-                        {
-                            char buffer[4096];
-                            while (fgets(buffer, sizeof(buffer), file))
-                            {
-                                printf("%s", buffer);
-                            }
-                            fclose(file);
-                        }
-                        else
-                        {
-                            printf("\033[31mMissing permissions for task!\033[0m\n");
-                        }
-                    }
-                }
-            }
-        }
-
-        if (is_dir && !is_file)
-        {
-            match_count += search_directory(search_term, fullpath, dir_flag, file_flag, exec_flag);
-        }
-    }
-
-    closedir(dir);
-
-    // Change directory if exactly one directory was matched and the -e flag is set
-    if (matching_dir_count == 1 && exec_flag)
-    {
-        if (chdir(matching_dir) < 0)
-        {
-            printf("\033[31mchdir\n\033[0m\n");
-            printf("Failed to change directory to %s\n", matching_dir);
-        }
-        else
-        {
-            // Update the prompt to reflect the new directory
-            char cwd[1024];
-            if (getcwd(cwd, sizeof(cwd)) != NULL)
-            {
-                printf("Changed directory to: %s\n", cwd);
-                // Here you should update your shell prompt logic to reflect the new directory
-                // For example:
-                // update_prompt(cwd);
-            }
-            else
-            {
-                printf("\033[31mgetcwd\n\033[0m\n");
-            }
-        }
-    }
-
-    return match_count;
-}
-
-void initial_tokenize(char *input, char *curr, char *prev, char *home, queue *que, char *file)
-{
-    // Log the entire input line to the queue and file before any tokenization
-    int conform = 0;
-    if (que->front == -1)
-    {
-        conform = 1; // Queue is empty, so log the input
-    }
-    else if (strcmp(input, que->info[que->rear]) != 0)
-    {
-        conform = 1; // The input is different from the last logged input
-    }
-
-    // Use strstr to check if "log" is at the beginning of the input
-    if (conform == 1 && (strstr(input, "log") != input))
-    {
-        if (size(que) == 15)
-        {
-            deque(que); // Remove the oldest entry if the queue is full
-        }
-        enque(que, input);      // Add the entire input line to the queue
-        que_to_file(que, file); // Write the queue (including the new entry) to the file
-    }
-
-    // Now proceed with the tokenization and processing of commands
-    char *cmd;
-    char *saveptr_cmd;
-
-    // Tokenize the input using ';' as the delimiter
-    cmd = strtok_r(input, ";", &saveptr_cmd);
-    while (cmd != NULL)
-    {
-        // Process each command obtained after tokenization
-        int count = -1;
-        char *cmd_cpy = strdup(cmd); // Create a copy of the command for processing
-        trim_whitespace(cmd_cpy);
-
-        if (cmd_cpy[strlen(cmd_cpy) - 1] == '&')
-        {
-            count++;
-        }
-        char *cmd1;
-        char *saveptr_cmd1;
-
-        cmd1 = strtok_r(cmd_cpy, "&", &saveptr_cmd1);
-        while (cmd1 != NULL)
-        {
-            count++;
-            cmd1 = strtok_r(NULL, "&", &saveptr_cmd1);
-        }
-        free(cmd_cpy);
-
-        tokenize_by_ampersand(cmd, curr, prev, home, que, file, count);
-
-        // Move to the next command
-        cmd = strtok_r(NULL, ";", &saveptr_cmd);
+        printf("[%d] : %s - %s\n", pid, command, status);
     }
 }
-
-// Rest of the code remains unchanged
 
 int main()
 {
@@ -589,9 +608,9 @@ int main()
         return 1;
     }
 
-    strcpy(prev_direc, home_direc);
+    strcpy(prev_direc, " ");
     strcpy(curr_direc, home_direc);
-    char *file = (char *)malloc(4096 * sizeof(char)); // Allocate memory for file
+    char *file = (char *)malloc(4096 * sizeof(char));
     if (file == NULL)
     {
         printf("\033[31mFailed to allocate memory for file\n\033[0m\n");
@@ -600,42 +619,59 @@ int main()
     strcpy(file, home_direc);
     strcat(file, "/store.txt");
 
-    queue *que = (queue *)malloc(sizeof(queue)); // Allocate memory for the queue
+    queue *que = (queue *)malloc(sizeof(queue));
     if (que == NULL)
     {
         printf("\033[31mFailed to allocate memory for queue\n\033[0m\n");
-        free(file); // Free allocated memory before returning
+        free(file);
         return 1;
     }
     init_que(que);
 
-    // Populate the queue from the file before entering the main loop
     file_to_que(que, file);
-
     while (1)
     {
+        signal(SIGINT, for_CTRL_C);
+        signal(SIGTSTP, for_CTRL_Z);
         printinfo(curr_direc, home_direc);
-
-        char scan[1024];
-        if (fgets(scan, sizeof(scan), stdin) != NULL)
+        char scan[4096];
+        // for CTRL-D
+        if (fgets(scan, 4096, stdin) == NULL)
         {
-            scan[strcspn(scan, "\n")] = '\0'; // Remove newline character
-
-            // Use initial_tokenize to process the input
+            for (int i = 0; i < bg_process_count; i++)
+            {
+                int p = background_processes[i].pid;
+                if (kill(p, 0) == 0)
+                {
+                    if (kill(p, SIGKILL) == 0)
+                    {
+                        printf("Sent signal %d to process with pid %d", SIGKILL, p);
+                    }
+                    else
+                    {
+                        perror("kill");
+                    }
+                }
+                else
+                {
+                    printf("process with pid %d doesn't exist", p);
+                }
+            }
+            printf("\nEOF (Ctrl+D) detected.Exiting program.\n");
+            return 0;
+        }
+        else
+        {
+            scan[strcspn(scan, "\n")] = '\0';
             if (strcmp("stop", scan) == 0)
             {
                 break;
             }
-            // printf("ss");
-            initial_tokenize(scan, curr_direc, prev_direc, home_direc, que, file);
-        }
-        else
-        {
-            printf("\033[31mError reading input.\033[0m\n");
+            initial_tokenize(scan, curr_direc, prev_direc, home_direc, que, file, 1);
         }
     }
 
-    free(file); // Free allocated memory before exiting
-    free(que);  // Free the queue structure memory
+    free(file);
+    free(que);
     return 0;
 }

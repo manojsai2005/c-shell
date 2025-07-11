@@ -20,11 +20,7 @@ void process_info(char *token)
     long vmsize = 0;
     pid_t ppid = 0;
     char exe_path[4096] = "";
-
-    // Print PID
     printf("pid : %d\n", pid);
-
-    // Correct the path to /proc/[pid]/status
     snprintf(path, sizeof(path), "/proc/%d/status", pid);
     file = fopen(path, "r");
     if (file == NULL)
@@ -32,8 +28,6 @@ void process_info(char *token)
         perror("failed to open file");
         return;
     }
-
-    // Reading and parsing the /proc/[pid]/status file
     while (fgets(line, sizeof(line), file))
     {
         if (strncmp(line, "State:", 6) == 0)
@@ -50,14 +44,10 @@ void process_info(char *token)
         }
     }
     fclose(file);
-
-    // Check if the process is in the foreground
-    pid_t fg_pgid = tcgetpgrp(STDOUT_FILENO);  // Get the foreground process group of the terminal
-    pid_t proc_pgid = getpgid(pid);            // Get the process group ID of the process
+    pid_t fg_pgid = tcgetpgrp(STDOUT_FILENO);
+    pid_t proc_pgid = getpgid(pid);
 
     int is_foreground = (fg_pgid == proc_pgid);
-
-    // Print the process status
     if (status_str[0] == 'R')
     {
         if (is_foreground)
@@ -88,14 +78,8 @@ void process_info(char *token)
     {
         printf("process status : %s\n", status_str);
     }
-
-    // Print the Process Group
     printf("Process Group : %d\n", ppid);
-
-    // Print the Virtual Memory size
     printf("Virtual memory : %ld kB\n", vmsize);
-
-    // Get executable path
     snprintf(path, sizeof(path), "/proc/%d/exe", pid);
     ssize_t len = readlink(path, exe_path, sizeof(exe_path) - 1);
     if (len != -1)

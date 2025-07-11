@@ -81,7 +81,7 @@ void que_to_file(queue *que, char *file_name)
             perror("error writing to file");
             break;
         }
-        fflush(f); // Ensure data is written immediately
+        fflush(f); 
         if (i == que->rear)
         {
             break;
@@ -89,41 +89,8 @@ void que_to_file(queue *que, char *file_name)
         i = (i + 1) % QUEUE_CAPACITY;
     }
 
-    fclose(f); // Ensure the file is closed after writing
+    fclose(f); 
 }
-// void que_to_file(queue *que, char *file_name)
-// {
-//     FILE *f = fopen(file_name, "w");
-//     if (f == NULL)
-//     {
-//         perror("unable to open file");
-//         return;
-//     }
-
-//     if (que->front == -1) // Check if the queue is empty
-//     {
-//         fclose(f);
-//         return;
-//     }
-
-//     int i = que->front;
-//     printf("Writing queue to file:\n"); // Debugging output
-
-//     do
-//     {
-//         if (fprintf(f, "%s\n", que->info[i]) < 0)
-//         {
-//             perror("error writing to file");
-//             break;
-//         }
-//         fflush(f); // Ensure data is written immediately
-//         printf("Written: %s\n", que->info[i]); // Debugging output
-//         i = (i + 1) % QUEUE_CAPACITY;
-//     } while (i != (que->rear + 1) % QUEUE_CAPACITY); // Continue until all elements are written
-
-//     fclose(f); // Ensure the file is closed after writing
-//     printf("Queue write operation completed.\n"); // Debugging output
-// }
 
 void queue_out(queue *que)
 {
@@ -149,18 +116,18 @@ void file_to_que(queue *que, char *file_name)
     FILE *f = fopen(file_name, "r");
     if (f == NULL)
     {
-        // perror("unable to open file // dd");
+        
         return;
     }
 
     char buffer[1024];
-    init_que(que); // Initialize the queue before populating it
+    init_que(que);
 
     while (fgets(buffer, sizeof(buffer), f) != NULL)
     {
-        buffer[strcspn(buffer, "\n")] = '\0'; // Remove newline character
+        buffer[strcspn(buffer, "\n")] = '\0';
         enque(que, buffer);
-        fflush(f); // Flush the input buffer after each read
+        fflush(f);
     }
 
     if (ferror(f))
